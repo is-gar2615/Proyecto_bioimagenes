@@ -632,7 +632,435 @@ class DICOM3DViewer:
         print(
             f"Umbrales: [{lower_threshold:.1f}, {upper_threshold:.1f}] | Visible: {visible_percentage:.1f}% ({visible_voxels}/{total_voxels} voxels)")
 
+    def segment_by_otsu(self):
+        """Segmentación usando el método de Otsu"""
+        if self.array is None:
+            raise ValueError("Primero debe cargar la serie DICOM")
 
+        print("Realizando segmentación OTSU...")
+
+        # Aplanar el array para el cálculo de Otsu
+        flattened = self.array.ravel()
+
+        # Calcular el threshold de Otsu
+        from skimage.filters import threshold_otsu
+        try:
+            otsu_threshold = threshold_otsu(flattened)
+            print(f"Threshold OTSU calculado: {otsu_threshold:.2f}")
+
+            # Crear máscara binaria
+            mask = self.array > otsu_threshold
+
+            # Aplicar máscara
+            segmented_array = np.where(mask, self.array, np.min(self.array))
+
+            # Mostrar información
+            foreground_voxels = np.sum(mask)
+            total_voxels = mask.size
+            percentage = (foreground_voxels / total_voxels) * 100
+
+            print(f"Voxeles en foreground: {foreground_voxels}/{total_voxels} ({percentage:.2f}%)")
+
+            return segmented_array, otsu_threshold, mask
+
+        except ImportError:
+            print("Error: scikit-image no está instalado. Instala con: pip install scikit-image")
+            return None, None, None
+
+    def segment_by_kmeans(self, n_clusters=3):
+        """Segmentación usando K-Means clustering"""
+        if self.array is None:
+            raise ValueError("Primero debe cargar la serie DICOM")
+
+        print(f"Realizando segmentación K-Means con {n_clusters} clusters...")
+
+        try:
+            from sklearn.cluster import KMeans
+
+            # Obtener forma original
+            original_shape = self.array.shape
+            print(f"Forma del volumen: {original_shape}")
+            print(f"Rango de intensidades: [{np.min(self.array):.2f}, {np.max(self.array):.2f}]")
+
+            # Aplanar el array para K-Means
+            flattened = self.array.ravel().reshape(-1, 1)
+            print(f"Total de voxeles: {flattened.shape[0]}")
+
+            # Si hay demasiados datos, tomar una muestra representativa
+            if flattened.shape[0] > 50000:
+                print("Muestreando datos para K-Means...")
+                sample_indices = np.random.choice(flattened.shape[0], 50000, replace=False)
+                sample_data = flattened[sample_indices]
+            else:
+                sample_data = flattened
+
+            print(f"Entrenando K-Means con {sample_data.shape[0]} muestras...")
+
+            # Aplicar K-Means
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10, verbose=1)
+            kmeans.fit(sample_data)
+
+            # Predecir para todos los voxeles
+            print("Aplicando segmentación a todo el volumen...")
+            labels = kmeans.predict(flattened)
+
+            # Obtener centros de clusters
+            cluster_centers = kmeans.cluster_centers_.flatten()
+            sorted_indices = np.argsort(cluster_centers)
+
+            print("Centros de clusters K-Means:")
+            for i, idx in enumerate(sorted_indices):
+                print(f"  Cluster {i}: intensidad = {cluster_centers[idx]:.2f}")
+
+            # Usar el cluster más brillante (tejidos de interés)
+            brightest_cluster = sorted_indices[-1]
+            mask = (labels == brightest_cluster)
+            mask_3d = mask.reshape(original_shape)
+
+            print(
+                f"Usando cluster más brillante (índice {brightest_cluster}) con intensidad {cluster_centers[brightest_cluster]:.2f}")
+
+            # Crear array segmentado
+            background_value = np.min(self.array)
+            segmented_array = np.where(mask_3d, self.array, background_value)
+
+            # Calcular estadísticas
+            foreground_voxels = np.sum(mask)
+            total_voxels = mask.size
+            percentage = (foreground_voxels / total_voxels) * 100
+
+            print(f"\nESTADÍSTICAS K-MEANS:")
+            print(f"  - Voxeles en cluster brillante: {foreground_voxels}/{total_voxels} ({percentage:.2f}%)")
+            print(f"  - Rango en segmentado: [{np.min(segmented_array):.2f}, {np.max(segmented_array):.2f}]")
+
+            return segmented_array, kmeans, mask_3d
+
+        except Exception as e:
+            print(f"Error en segmentación K-Means: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, None, None
+
+    def volume_rendering_kmeans(self, n_clusters=3):
+        """Volume rendering para segmentación K-Means"""
+        print(f"Iniciando segmentación K-Means con {n_clusters} clusters...")
+
+        segmented_array, kmeans, mask = self.segment_by_kmeans(n_clusters)
+
+        if segmented_array is None:
+            print("Error: No se pudo realizar la segmentación K-Means")
+            return
+
+        print("Preparando visualización 3D para K-Means...")
+
+        # Verificar el array segmentado
+        print(f"Array segmentado - forma: {segmented_array.shape}")
+        print(f"Array segmentado - rango: [{np.min(segmented_array):.2f}, {np.max(segmented_array):.2f}]")
+
+        # Identificar valores de fondo y foreground
+        background_value = np.min(segmented_array)
+        foreground_mask = segmented_array > background_value
+        foreground_values = segmented_array[foreground_mask]
+
+        if len(foreground_values) == 0:
+            print("ERROR: No hay valores de foreground en el array segmentado")
+            return
+
+        foreground_min = np.min(foreground_values)
+        foreground_max = np.max(foreground_values)
+
+        print(f"Foreground - rango: [{foreground_min:.2f}, {foreground_max:.2f}]")
+        print(f"Foreground - voxeles: {np.sum(foreground_mask)}")
+
+        # Convertir a VTK
+        vtk_array = segmented_array.astype(np.float32)
+        vtk_data = numpy_support.numpy_to_vtk(vtk_array.ravel(), array_type=vtk.VTK_FLOAT)
+
+        vtk_image = vtk.vtkImageData()
+        vtk_image.SetDimensions(segmented_array.shape[2], segmented_array.shape[1], segmented_array.shape[0])
+        vtk_image.SetSpacing([1.0, 1.0, 1.0])
+        vtk_image.GetPointData().SetScalars(vtk_data)
+
+        # Crear mapper
+        volume_mapper = vtk.vtkFixedPointVolumeRayCastMapper()
+        volume_mapper.SetInputData(vtk_image)
+
+        # Función de transferencia de OPACIDAD
+        opacity_transfer = vtk.vtkPiecewiseFunction()
+
+        # Fondo completamente transparente
+        opacity_transfer.AddPoint(background_value, 0.0)
+        opacity_transfer.AddPoint(background_value + 0.1, 0.0)
+
+        # Foreground con diferentes niveles de opacidad
+        if foreground_min > background_value + 1:
+            opacity_transfer.AddPoint(foreground_min - 0.1, 0.0)
+            opacity_transfer.AddPoint(foreground_min, 0.4)
+        else:
+            opacity_transfer.AddPoint(background_value + 1, 0.4)
+
+        opacity_transfer.AddPoint((foreground_min + foreground_max) / 2, 0.8)
+        opacity_transfer.AddPoint(foreground_max, 1.0)
+
+        # Función de transferencia de COLOR - Esquema específico para K-Means
+        color_transfer = vtk.vtkColorTransferFunction()
+
+        # Fondo negro/transparente
+        color_transfer.AddRGBPoint(background_value, 0.0, 0.0, 0.0)
+        color_transfer.AddRGBPoint(background_value + 0.1, 0.0, 0.0, 0.0)
+
+        # Gradiente de colores cálidos para K-Means
+        if foreground_min > background_value + 1:
+            color_transfer.AddRGBPoint(foreground_min - 0.1, 0.0, 0.0, 0.0)
+            color_transfer.AddRGBPoint(foreground_min, 1.0, 0.5, 0.0)  # Naranja
+        else:
+            color_transfer.AddRGBPoint(background_value + 1, 1.0, 0.5, 0.0)
+
+        color_transfer.AddRGBPoint((foreground_min + foreground_max) * 0.4, 1.0, 0.8, 0.0)  # Amarillo-naranja
+        color_transfer.AddRGBPoint((foreground_min + foreground_max) * 0.7, 1.0, 0.9, 0.4)  # Amarillo claro
+        color_transfer.AddRGBPoint(foreground_max, 1.0, 1.0, 0.8)  # Amarillo muy claro
+
+        # Propiedades del volumen
+        volume_property = vtk.vtkVolumeProperty()
+        volume_property.SetColor(color_transfer)
+        volume_property.SetScalarOpacity(opacity_transfer)
+        volume_property.ShadeOn()
+        volume_property.SetInterpolationTypeToLinear()
+        volume_property.SetAmbient(0.5)
+        volume_property.SetDiffuse(0.7)
+        volume_property.SetSpecular(0.3)
+
+        # Crear volumen
+        volume = vtk.vtkVolume()
+        volume.SetMapper(volume_mapper)
+        volume.SetProperty(volume_property)
+
+        # Configurar renderer
+        renderer = vtk.vtkRenderer()
+        render_window = vtk.vtkRenderWindow()
+        render_window.AddRenderer(renderer)
+        render_window.SetSize(1000, 800)
+        render_window.SetWindowName(f"Segmentación K-Means - {n_clusters} Clusters")
+
+        renderer.AddVolume(volume)
+        renderer.SetBackground(0.0, 0.1, 0.2)  # Fondo azul oscuro
+        renderer.ResetCamera()
+
+        # Interactor
+        render_window_interactor = vtk.vtkRenderWindowInteractor()
+        render_window_interactor.SetRenderWindow(render_window)
+
+        print("=" * 60)
+        print("VISUALIZACIÓN K-MEANS LISTA")
+        print("=" * 60)
+        print(f"Clusters: {n_clusters}")
+        print(f"Voxeles visibles: {np.sum(foreground_mask)}")
+        print(f"Porcentaje del volumen: {(np.sum(foreground_mask) / foreground_mask.size * 100):.2f}%")
+        print("Controles: Ratón para rotar, R para reset, Q para salir")
+
+        render_window.Render()
+        render_window_interactor.Start()
+
+    def volume_rendering_otsu(self):
+        """Volume rendering para segmentación OTSU - MEJORADO"""
+        segmented_array, otsu_threshold, mask = self.segment_by_otsu()
+
+        if segmented_array is None:
+            return
+
+        print("Preparando volume rendering para segmentación OTSU...")
+
+        # Usar el array segmentado directamente
+        vtk_array = segmented_array.astype(np.float32)
+        vtk_data = numpy_support.numpy_to_vtk(vtk_array.ravel(), array_type=vtk.VTK_FLOAT)
+
+        vtk_image = vtk.vtkImageData()
+        vtk_image.SetDimensions(self.array.shape[2], self.array.shape[1], self.array.shape[0])
+        vtk_image.SetSpacing([1.0, 1.0, 1.0])
+        vtk_image.GetPointData().SetScalars(vtk_data)
+
+        volume_mapper = vtk.vtkFixedPointVolumeRayCastMapper()
+        volume_mapper.SetInputData(vtk_image)
+
+        # Función de transferencia para OTSU
+        opacity_transfer = vtk.vtkPiecewiseFunction()
+        data_min = np.min(segmented_array)
+        data_max = np.max(segmented_array)
+
+        opacity_transfer.AddPoint(data_min, 0.0)
+        opacity_transfer.AddPoint(data_min + 1, 0.9)  # Opaco para segmentación
+        opacity_transfer.AddPoint(data_max, 1.0)
+
+        # Esquema de color para OTSU
+        color_transfer = vtk.vtkColorTransferFunction()
+        color_transfer.AddRGBPoint(data_min, 0.0, 0.0, 0.0)
+        color_transfer.AddRGBPoint(data_min + 1, 0.0, 1.0, 0.0)  # Verde
+        color_transfer.AddRGBPoint(data_max, 1.0, 1.0, 0.0)  # Amarillo
+
+        volume_property = vtk.vtkVolumeProperty()
+        volume_property.SetColor(color_transfer)
+        volume_property.SetScalarOpacity(opacity_transfer)
+        volume_property.ShadeOn()
+        volume_property.SetInterpolationTypeToLinear()
+        volume_property.SetAmbient(0.5)
+        volume_property.SetDiffuse(0.6)
+        volume_property.SetSpecular(0.2)
+
+        volume = vtk.vtkVolume()
+        volume.SetMapper(volume_mapper)
+        volume.SetProperty(volume_property)
+
+        renderer = vtk.vtkRenderer()
+        render_window = vtk.vtkRenderWindow()
+        render_window.AddRenderer(renderer)
+        render_window.SetSize(1000, 800)
+        render_window.SetWindowName(f"Segmentación OTSU - Threshold: {otsu_threshold:.2f}")
+
+        renderer.AddVolume(volume)
+        renderer.SetBackground(0.0, 0.0, 0.0)
+        renderer.ResetCamera()
+
+        render_window_interactor = vtk.vtkRenderWindowInteractor()
+        render_window_interactor.SetRenderWindow(render_window)
+
+        print(f"Segmentación OTSU lista. Threshold: {otsu_threshold:.2f}")
+        render_window.Render()
+        render_window_interactor.Start()
+
+    def volume_rendering_gaussian(self, n_components=3):
+        """Volume rendering para segmentación Gaussiana - CORREGIDO"""
+        segmented_array, gmm, mask = self.segment_by_gaussian(n_components)
+
+        if segmented_array is None:
+            return
+
+        print("Preparando volume rendering para segmentación Gaussiana...")
+
+        # Usar el array segmentado directamente para el rendering
+        vtk_array = segmented_array.astype(np.float32)
+        vtk_data = numpy_support.numpy_to_vtk(vtk_array.ravel(), array_type=vtk.VTK_FLOAT)
+
+        vtk_image = vtk.vtkImageData()
+        vtk_image.SetDimensions(self.array.shape[2], self.array.shape[1], self.array.shape[0])
+        vtk_image.SetSpacing([1.0, 1.0, 1.0])
+        vtk_image.GetPointData().SetScalars(vtk_data)
+
+        volume_mapper = vtk.vtkFixedPointVolumeRayCastMapper()
+        volume_mapper.SetInputData(vtk_image)
+
+        # Función de transferencia para segmentación gaussiana
+        opacity_transfer = vtk.vtkPiecewiseFunction()
+        data_min = np.min(segmented_array)
+        data_max = np.max(segmented_array)
+        background_value = data_min
+
+        # Hacer transparente el fondo y opaco lo segmentado
+        opacity_transfer.AddPoint(background_value, 0.0)
+        opacity_transfer.AddPoint(background_value + 1, 0.9)  # Opaco para valores segmentados
+        opacity_transfer.AddPoint(data_max, 1.0)
+
+        # Esquema de color para segmentación gaussiana
+        color_transfer = vtk.vtkColorTransferFunction()
+        color_transfer.AddRGBPoint(background_value, 0.0, 0.0, 0.0)  # Transparente
+        color_transfer.AddRGBPoint(background_value + 1, 0.2, 0.8, 0.2)  # Verde para segmentación
+        color_transfer.AddRGBPoint((data_max + background_value + 1) / 2, 0.8, 0.8, 0.2)  # Amarillo
+        color_transfer.AddRGBPoint(data_max, 0.8, 0.2, 0.2)  # Rojo
+
+        volume_property = vtk.vtkVolumeProperty()
+        volume_property.SetColor(color_transfer)
+        volume_property.SetScalarOpacity(opacity_transfer)
+        volume_property.ShadeOn()
+        volume_property.SetInterpolationTypeToLinear()
+        volume_property.SetAmbient(0.5)
+        volume_property.SetDiffuse(0.6)
+        volume_property.SetSpecular(0.2)
+
+        volume = vtk.vtkVolume()
+        volume.SetMapper(volume_mapper)
+        volume.SetProperty(volume_property)
+
+        renderer = vtk.vtkRenderer()
+        render_window = vtk.vtkRenderWindow()
+        render_window.AddRenderer(renderer)
+        render_window.SetSize(1000, 800)
+        render_window.SetWindowName(f"Segmentación Gaussiana - {n_components} componentes")
+
+        renderer.AddVolume(volume)
+        renderer.SetBackground(0.0, 0.0, 0.0)
+        renderer.ResetCamera()
+
+        render_window_interactor = vtk.vtkRenderWindowInteractor()
+        render_window_interactor.SetRenderWindow(render_window)
+
+        # Calcular estadísticas
+        visible_voxels = np.sum(mask)
+        total_voxels = mask.size
+        percentage = (visible_voxels / total_voxels) * 100
+
+        print(f"Segmentación Gaussiana lista.")
+        print(f"Voxeles visibles: {visible_voxels}/{total_voxels} ({percentage:.2f}%)")
+
+        render_window.Render()
+        render_window_interactor.Start()
+
+    def _volume_rendering_segmented(self, segmented_array, title):
+        """Función auxiliar para volume rendering de arrays segmentados"""
+        vtk_array = segmented_array.astype(np.float32)
+        vtk_data = numpy_support.numpy_to_vtk(vtk_array.ravel(), array_type=vtk.VTK_FLOAT)
+
+        vtk_image = vtk.vtkImageData()
+        vtk_image.SetDimensions(self.array.shape[2], self.array.shape[1], self.array.shape[0])
+        vtk_image.SetSpacing([1.0, 1.0, 1.0])
+        vtk_image.GetPointData().SetScalars(vtk_data)
+
+        volume_mapper = vtk.vtkFixedPointVolumeRayCastMapper()
+        volume_mapper.SetInputData(vtk_image)
+
+        # Función de transferencia para segmentación
+        opacity_transfer = vtk.vtkPiecewiseFunction()
+        data_min = np.min(segmented_array)
+        data_max = np.max(segmented_array)
+
+        # Hacer transparentes los valores de fondo
+        opacity_transfer.AddPoint(data_min, 0.0)
+        opacity_transfer.AddPoint(data_min + 1, 0.8)  # Opaco para valores segmentados
+        opacity_transfer.AddPoint(data_max, 1.0)
+
+        # Esquema de color para segmentación
+        color_transfer = vtk.vtkColorTransferFunction()
+        color_transfer.AddRGBPoint(data_min, 0.0, 0.0, 0.0)  # Transparente
+        color_transfer.AddRGBPoint(data_min + 1, 0.0, 1.0, 0.0)  # Verde para segmentación
+        color_transfer.AddRGBPoint(data_max, 1.0, 1.0, 0.0)  # Amarillo para valores altos
+
+        volume_property = vtk.vtkVolumeProperty()
+        volume_property.SetColor(color_transfer)
+        volume_property.SetScalarOpacity(opacity_transfer)
+        volume_property.ShadeOn()
+        volume_property.SetInterpolationTypeToLinear()
+        volume_property.SetAmbient(0.5)
+        volume_property.SetDiffuse(0.6)
+        volume_property.SetSpecular(0.2)
+
+        volume = vtk.vtkVolume()
+        volume.SetMapper(volume_mapper)
+        volume.SetProperty(volume_property)
+
+        renderer = vtk.vtkRenderer()
+        render_window = vtk.vtkRenderWindow()
+        render_window.AddRenderer(renderer)
+        render_window.SetSize(1000, 800)
+        render_window.SetWindowName(title)
+
+        renderer.AddVolume(volume)
+        renderer.SetBackground(0.0, 0.0, 0.0)
+        renderer.ResetCamera()
+
+        render_window_interactor = vtk.vtkRenderWindowInteractor()
+        render_window_interactor.SetRenderWindow(render_window)
+
+        print(f"{title} lista.")
+        render_window.Render()
+        render_window_interactor.Start()
 
 
 
@@ -692,15 +1120,44 @@ def main():
 
             if choice == '1':
                 print("\n" + "=" * 50)
-                print("SEGMENTACIÓN INTERACTIVA POR UMBRALES")
+                print("MÉTODOS DE SEGMENTACIÓN")
                 print("=" * 50)
-                print("Iniciando visualización con sliders interactivos...")
-                print("Se abrirá una ventana con dos sliders para ajustar:")
-                print("  - Umbral Inferior (azul → verde)")
-                print("  - Umbral Superior (verde → rojo)")
-                print("\nLos valores fuera del rango seleccionado serán transparentes.")
+                print("1. Segmentación por Umbrales Interactiva")
+                print("2. Segmentación OTSU (automática)")
+                print("3. Segmentación Gaussiana (GMM)")
+                print("4. Volver al menú principal")
 
-                viewer.volume_rendering_threshold_interactive()
+                seg_choice = input("Selecciona método de segmentación (1-4): ").strip()
+
+                if seg_choice == '1':
+                    print("\nIniciando segmentación interactiva por umbrales...")
+                    print("Se abrirá una ventana con sliders para ajustar los umbrales.")
+                    viewer.volume_rendering_threshold_interactive()
+
+                elif seg_choice == '2':
+                    print("\nIniciando segmentación OTSU...")
+                    print("Calculando threshold óptimo automáticamente...")
+                    viewer.volume_rendering_otsu()
+
+                elif seg_choice == '3':
+                    print("\nIniciando segmentación K-Means...")
+                    try:
+                        n_clusters = input("Número de clusters (Enter para 3): ").strip()
+                        n_clusters = int(n_clusters) if n_clusters else 3
+                        if n_clusters < 2 or n_clusters > 6:
+                            print("Usando valor por defecto (3 clusters)")
+                            n_clusters = 3
+                    except:
+                        n_clusters = 3
+                        print("Usando valor por defecto (3 clusters)")
+
+                    viewer.volume_rendering_kmeans(n_clusters)
+
+                elif seg_choice == '4':
+                    continue
+
+                else:
+                    print("Opción no válida.")
             elif choice == '2':
                 print("Iniciando surface rendering... (esto puede tomar unos segundos)")
                 viewer.surface_rendering_simple()
