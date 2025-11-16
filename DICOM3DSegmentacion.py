@@ -1062,6 +1062,267 @@ class DICOM3DViewer:
         render_window.Render()
         render_window_interactor.Start()
 
+    def volume_rendering_multiple_schemes_interactive(self):
+        """Volume rendering con múltiples esquemas de color basados en umbrales"""
+        if self.array is None:
+            raise ValueError("Primero debe cargar la serie DICOM")
+
+        print("Preparando volume rendering con múltiples esquemas de color...")
+
+        # Calcular umbrales iniciales automáticamente
+        initial_lower = np.percentile(self.array, 25)
+        initial_upper = np.percentile(self.array, 75)
+
+        print(f"Umbrales iniciales - Inferior: {initial_lower:.1f}, Superior: {initial_upper:.1f}")
+        print("Esquemas de color:")
+        print("  - Debajo del umbral inferior: Esquema Frío (azules)")
+        print("  - Entre umbrales: Esquema Médico (grises/naranjas)")
+        print("  - Encima del umbral superior: Esquema Caliente (rojos/amarillos)")
+
+        # Crear el volumen VTK
+        vtk_array = self.array.astype(np.float32)
+        vtk_data = numpy_support.numpy_to_vtk(vtk_array.ravel(), array_type=vtk.VTK_FLOAT)
+
+        self.vtk_image = vtk.vtkImageData()
+        self.vtk_image.SetDimensions(self.array.shape[2], self.array.shape[1], self.array.shape[0])
+        self.vtk_image.SetSpacing([1.0, 1.0, 1.0])
+        self.vtk_image.GetPointData().SetScalars(vtk_data)
+
+        # Mapper
+        self.volume_mapper = vtk.vtkFixedPointVolumeRayCastMapper()
+        self.volume_mapper.SetInputData(self.vtk_image)
+
+        # Funciones de transferencia
+        self.opacity_transfer = vtk.vtkPiecewiseFunction()
+        self.color_transfer = vtk.vtkColorTransferFunction()
+
+        # Propiedades del volumen
+        self.volume_property = vtk.vtkVolumeProperty()
+        self.volume_property.SetColor(self.color_transfer)
+        self.volume_property.SetScalarOpacity(self.opacity_transfer)
+        self.volume_property.ShadeOn()
+        self.volume_property.SetInterpolationTypeToLinear()
+        self.volume_property.SetAmbient(0.5)
+        self.volume_property.SetDiffuse(0.6)
+        self.volume_property.SetSpecular(0.2)
+
+        # Volumen
+        self.volume = vtk.vtkVolume()
+        self.volume.SetMapper(self.volume_mapper)
+        self.volume.SetProperty(self.volume_property)
+
+        # Renderer y ventana
+        self.renderer = vtk.vtkRenderer()
+        self.render_window = vtk.vtkRenderWindow()
+        self.render_window.AddRenderer(self.renderer)
+        self.render_window.SetSize(1200, 900)
+        self.render_window.SetWindowName("Múltiples Esquemas de Color - Ajuste de Umbrales")
+
+        self.renderer.AddVolume(self.volume)
+        self.renderer.SetBackground(0.1, 0.1, 0.2)
+        self.renderer.ResetCamera()
+
+        # Interactor
+        self.render_window_interactor = vtk.vtkRenderWindowInteractor()
+        self.render_window_interactor.SetRenderWindow(self.render_window)
+
+        # Crear sliders interactivos
+        self._create_multischeme_sliders(initial_lower, initial_upper)
+
+        # Actualizar la transferencia inicial
+        self._update_multischeme_transfer(initial_lower, initial_upper)
+
+        print("Visualización con múltiples esquemas lista!")
+        print("Instrucciones:")
+        print("  - Usa los sliders para ajustar los umbrales inferior y superior")
+        print("  - Debajo del inferior: Esquema Frío (azules)")
+        print("  - Entre umbrales: Esquema Médico (grises/naranjas)")
+        print("  - Encima del superior: Esquema Caliente (rojos/amarillos)")
+        print("  - Arrastra con el mouse para rotar la vista 3D")
+        print("  - R: Reset de cámara")
+        print("  - Q: Salir")
+
+        self.render_window.Render()
+        self.render_window_interactor.Start()
+
+    def _create_multischeme_sliders(self, initial_lower, initial_upper):
+        """Crea los sliders interactivos para múltiples esquemas"""
+        data_min = float(np.min(self.array))
+        data_max = float(np.max(self.array))
+
+        # Slider para umbral inferior
+        lower_slider = vtk.vtkSliderRepresentation2D()
+        lower_slider.SetMinimumValue(data_min)
+        lower_slider.SetMaximumValue(data_max)
+        lower_slider.SetValue(initial_lower)
+        lower_slider.SetTitleText("Umbral Inferior")
+
+        # Posición del slider inferior
+        lower_slider.GetPoint1Coordinate().SetCoordinateSystemToNormalizedDisplay()
+        lower_slider.GetPoint1Coordinate().SetValue(0.02, 0.25)
+        lower_slider.GetPoint2Coordinate().SetCoordinateSystemToNormalizedDisplay()
+        lower_slider.GetPoint2Coordinate().SetValue(0.25, 0.25)
+
+        # Estilo del slider
+        lower_slider.SetSliderLength(0.02)
+        lower_slider.SetSliderWidth(0.03)
+        lower_slider.SetEndCapLength(0.01)
+        lower_slider.SetEndCapWidth(0.03)
+        lower_slider.SetTitleHeight(0.025)
+        lower_slider.SetLabelHeight(0.02)
+        lower_slider.GetSliderProperty().SetColor(0.0, 0.5, 1.0)  # Azul para esquema frío
+        lower_slider.GetTitleProperty().SetColor(1.0, 1.0, 1.0)
+        lower_slider.GetLabelProperty().SetColor(1.0, 1.0, 1.0)
+
+        # Slider para umbral superior
+        upper_slider = vtk.vtkSliderRepresentation2D()
+        upper_slider.SetMinimumValue(data_min)
+        upper_slider.SetMaximumValue(data_max)
+        upper_slider.SetValue(initial_upper)
+        upper_slider.SetTitleText("Umbral Superior")
+
+        # Posición del slider superior
+        upper_slider.GetPoint1Coordinate().SetCoordinateSystemToNormalizedDisplay()
+        upper_slider.GetPoint1Coordinate().SetValue(0.02, 0.15)
+        upper_slider.GetPoint2Coordinate().SetCoordinateSystemToNormalizedDisplay()
+        upper_slider.GetPoint2Coordinate().SetValue(0.25, 0.15)
+
+        # Estilo del slider
+        upper_slider.SetSliderLength(0.02)
+        upper_slider.SetSliderWidth(0.03)
+        upper_slider.SetEndCapLength(0.01)
+        upper_slider.SetEndCapWidth(0.03)
+        upper_slider.SetTitleHeight(0.025)
+        upper_slider.SetLabelHeight(0.02)
+        upper_slider.GetSliderProperty().SetColor(1.0, 0.5, 0.0)  # Naranja para esquema caliente
+        upper_slider.GetTitleProperty().SetColor(1.0, 1.0, 1.0)
+        upper_slider.GetLabelProperty().SetColor(1.0, 1.0, 1.0)
+
+        # Widgets para los sliders
+        self.lower_slider_widget = vtk.vtkSliderWidget()
+        self.lower_slider_widget.SetInteractor(self.render_window_interactor)
+        self.lower_slider_widget.SetRepresentation(lower_slider)
+        self.lower_slider_widget.SetAnimationModeToAnimate()
+        self.lower_slider_widget.EnabledOn()
+
+        self.upper_slider_widget = vtk.vtkSliderWidget()
+        self.upper_slider_widget.SetInteractor(self.render_window_interactor)
+        self.upper_slider_widget.SetRepresentation(upper_slider)
+        self.upper_slider_widget.SetAnimationModeToAnimate()
+        self.upper_slider_widget.EnabledOn()
+
+        # Callbacks para los sliders
+        self.lower_slider_widget.AddObserver("InteractionEvent", self._lower_multischeme_callback)
+        self.upper_slider_widget.AddObserver("InteractionEvent", self._upper_multischeme_callback)
+
+    def _lower_multischeme_callback(self, obj, event):
+        """Callback para el slider del umbral inferior en múltiples esquemas"""
+        slider_widget = obj
+        value = slider_widget.GetRepresentation().GetValue()
+        upper_value = self.upper_slider_widget.GetRepresentation().GetValue()
+
+        # Asegurar que el inferior no sea mayor que el superior
+        if value > upper_value:
+            value = upper_value
+            slider_widget.GetRepresentation().SetValue(value)
+
+        self._update_multischeme_transfer(value, upper_value)
+        self.render_window.Render()
+
+    def _upper_multischeme_callback(self, obj, event):
+        """Callback para el slider del umbral superior en múltiples esquemas"""
+        slider_widget = obj
+        value = slider_widget.GetRepresentation().GetValue()
+        lower_value = self.lower_slider_widget.GetRepresentation().GetValue()
+
+        # Asegurar que el superior no sea menor que el inferior
+        if value < lower_value:
+            value = lower_value
+            slider_widget.GetRepresentation().SetValue(value)
+
+        self._update_multischeme_transfer(lower_value, value)
+        self.render_window.Render()
+
+    def _update_multischeme_transfer(self, lower_threshold, upper_threshold):
+        """Actualiza las funciones de transferencia para múltiples esquemas"""
+        data_min = float(np.min(self.array))
+        data_max = float(np.max(self.array))
+
+        # Limpiar funciones anteriores
+        self.opacity_transfer.RemoveAllPoints()
+        self.color_transfer.RemoveAllPoints()
+
+        # ACTUALIZAR OPACIDAD - mantener todo visible pero con variaciones
+        self.opacity_transfer.AddPoint(data_min, 0.1)  # Mínima opacidad para valores bajos
+
+        # Transición suave en el umbral inferior
+        self.opacity_transfer.AddPoint(lower_threshold - (lower_threshold - data_min) * 0.2, 0.2)
+        self.opacity_transfer.AddPoint(lower_threshold, 0.4)
+
+        # Zona media - máxima opacidad
+        mid_lower = lower_threshold + (upper_threshold - lower_threshold) * 0.3
+        mid_upper = lower_threshold + (upper_threshold - lower_threshold) * 0.7
+        self.opacity_transfer.AddPoint(mid_lower, 0.8)
+        self.opacity_transfer.AddPoint(mid_upper, 0.9)
+
+        # Transición en el umbral superior
+        self.opacity_transfer.AddPoint(upper_threshold, 0.7)
+        self.opacity_transfer.AddPoint(upper_threshold + (data_max - upper_threshold) * 0.2, 0.5)
+        self.opacity_transfer.AddPoint(data_max, 0.3)
+
+        # ACTUALIZAR COLOR - TRES ESQUEMAS COMBINADOS
+
+        # 1. ESQUEMA FRÍO (debajo del umbral inferior) - Azules
+        self.color_transfer.AddRGBPoint(data_min, 0.0, 0.0, 0.3)  # Azul muy oscuro
+        self.color_transfer.AddRGBPoint(data_min + (lower_threshold - data_min) * 0.3,
+                                        0.1, 0.1, 0.5)  # Azul oscuro
+        self.color_transfer.AddRGBPoint(data_min + (lower_threshold - data_min) * 0.6,
+                                        0.2, 0.4, 0.8)  # Azul medio
+        self.color_transfer.AddRGBPoint(lower_threshold,
+                                        0.4, 0.6, 1.0)  # Azul claro
+
+        # 2. ESQUEMA MÉDICO (entre umbrales) - Grises a Naranjas
+        self.color_transfer.AddRGBPoint(lower_threshold + (upper_threshold - lower_threshold) * 0.1,
+                                        0.7, 0.7, 0.7)  # Gris medio
+        self.color_transfer.AddRGBPoint(lower_threshold + (upper_threshold - lower_threshold) * 0.3,
+                                        0.9, 0.8, 0.6)  # Beige
+        self.color_transfer.AddRGBPoint(lower_threshold + (upper_threshold - lower_threshold) * 0.5,
+                                        1.0, 0.7, 0.4)  # Naranja claro
+        self.color_transfer.AddRGBPoint(lower_threshold + (upper_threshold - lower_threshold) * 0.7,
+                                        1.0, 0.6, 0.2)  # Naranja
+        self.color_transfer.AddRGBPoint(upper_threshold,
+                                        1.0, 0.5, 0.1)  # Naranja intenso
+
+        # 3. ESQUEMA CALIENTE (encima del umbral superior) - Rojos/Amarillos
+        self.color_transfer.AddRGBPoint(upper_threshold + (data_max - upper_threshold) * 0.2,
+                                        1.0, 0.4, 0.0)  # Rojo-naranja
+        self.color_transfer.AddRGBPoint(upper_threshold + (data_max - upper_threshold) * 0.4,
+                                        1.0, 0.3, 0.0)  # Rojo
+        self.color_transfer.AddRGBPoint(upper_threshold + (data_max - upper_threshold) * 0.6,
+                                        1.0, 0.6, 0.2)  # Rojo-amarillo
+        self.color_transfer.AddRGBPoint(upper_threshold + (data_max - upper_threshold) * 0.8,
+                                        1.0, 0.8, 0.4)  # Amarillo-naranja
+        self.color_transfer.AddRGBPoint(data_max,
+                                        1.0, 1.0, 0.8)  # Amarillo muy claro
+
+        # Calcular estadísticas por región
+        cold_region = (self.array < lower_threshold)
+        medical_region = (self.array >= lower_threshold) & (self.array <= upper_threshold)
+        hot_region = (self.array > upper_threshold)
+
+        cold_percentage = np.sum(cold_region) / cold_region.size * 100
+        medical_percentage = np.sum(medical_region) / medical_region.size * 100
+        hot_percentage = np.sum(hot_region) / hot_region.size * 100
+
+        # Actualizar título de la ventana con información
+        self.render_window.SetWindowName(
+            f"Múltiples Esquemas - Umbrales: [{lower_threshold:.1f}, {upper_threshold:.1f}] | "
+            f"Frío: {cold_percentage:.1f}% | Médico: {medical_percentage:.1f}% | Caliente: {hot_percentage:.1f}%"
+        )
+
+        print(f"Umbrales: [{lower_threshold:.1f}, {upper_threshold:.1f}] | "
+              f"Frío: {cold_percentage:.1f}% | Médico: {medical_percentage:.1f}% | Caliente: {hot_percentage:.1f}%")
+
 
 
 def main():
@@ -1116,7 +1377,7 @@ def main():
             print("6. Esquema de colores")
             print("7. Salir")
 
-            choice = input("\nSelecciona una opción (1-6): ").strip()
+            choice = input("\nSelecciona una opción (1-7): ").strip()
 
             if choice == '1':
                 print("\n" + "=" * 50)
@@ -1125,7 +1386,8 @@ def main():
                 print("1. Segmentación por Umbrales Interactiva")
                 print("2. Segmentación OTSU (automática)")
                 print("3. Segmentación Gaussiana (GMM)")
-                print("4. Volver al menú principal")
+                print("4. Múltiples Esquemas de Color por Umbrales")
+                print("5. Volver al menú principal")
 
                 seg_choice = input("Selecciona método de segmentación (1-4): ").strip()
 
@@ -1154,6 +1416,10 @@ def main():
                     viewer.volume_rendering_kmeans(n_clusters)
 
                 elif seg_choice == '4':
+                    print("\nIniciando múltiples esquemas de color por umbrales...")
+                    viewer.volume_rendering_multiple_schemes_interactive()
+
+                elif seg_choice == '5':
                     continue
 
                 else:
