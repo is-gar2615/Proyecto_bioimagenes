@@ -1323,6 +1323,141 @@ class DICOM3DViewer:
         print(f"Umbrales: [{lower_threshold:.1f}, {upper_threshold:.1f}] | "
               f"Frío: {cold_percentage:.1f}% | Médico: {medical_percentage:.1f}% | Caliente: {hot_percentage:.1f}%")
 
+    def surface_rendering_double_threshold(self, lower_threshold=None, upper_threshold=None):
+        """Surface rendering con umbral bajo y alto fijos"""
+        if self.array is None:
+            raise ValueError("Primero debe cargar la serie DICOM")
+
+        print("Preparando surface rendering con doble umbral...")
+
+        # Si no se proporcionan umbrales, pedirlos al usuario
+        if lower_threshold is None or upper_threshold is None:
+            data_min = np.min(self.array)
+            data_max = np.max(self.array)
+            print(f"Rango de datos: {data_min:.2f} a {data_max:.2f}")
+
+            if lower_threshold is None:
+                try:
+                    lower_threshold = float(input(f"Umbral inferior (recomendado > {data_min:.2f}): "))
+                except ValueError:
+                    lower_threshold = np.percentile(self.array, 40)
+                    print(f"Usando umbral inferior automático: {lower_threshold:.2f}")
+
+            if upper_threshold is None:
+                try:
+                    upper_threshold = float(input(f"Umbral superior (recomendado < {data_max:.2f}): "))
+                except ValueError:
+                    upper_threshold = np.percentile(self.array, 80)
+                    print(f"Usando umbral superior automático: {upper_threshold:.2f}")
+
+        # Validar umbrales
+        if lower_threshold >= upper_threshold:
+            print("Error: El umbral inferior debe ser menor al superior. Usando valores automáticos.")
+            lower_threshold = np.percentile(self.array, 40)
+            upper_threshold = np.percentile(self.array, 80)
+
+        print(f"Usando umbrales - Inferior: {lower_threshold:.2f}, Superior: {upper_threshold:.2f}")
+
+        # Convertir a VTK
+        vtk_array = self.array.astype(np.float32)
+        vtk_data = numpy_support.numpy_to_vtk(vtk_array.ravel(), array_type=vtk.VTK_FLOAT)
+
+        vtk_image = vtk.vtkImageData()
+        vtk_image.SetDimensions(self.array.shape[2], self.array.shape[1], self.array.shape[0])
+        vtk_image.SetSpacing([1.0, 1.0, 1.0])
+        vtk_image.GetPointData().SetScalars(vtk_data)
+
+        # Crear marching cubes con el rango de umbrales
+        marching_cubes = vtk.vtkMarchingCubes()
+        marching_cubes.SetInputData(vtk_image)
+        marching_cubes.ComputeNormalsOn()
+
+        # Usar múltiples contornos para el rango completo
+        num_contours = 3  # Menos contornos para mejor rendimiento
+        contour_values = np.linspace(lower_threshold, upper_threshold, num_contours)
+
+        for i, value in enumerate(contour_values):
+            marching_cubes.SetValue(i, value)
+
+        # Suavizar la superficie (menos iteraciones para mejor rendimiento)
+        smoother = vtk.vtkSmoothPolyDataFilter()
+        smoother.SetInputConnection(marching_cubes.GetOutputPort())
+        smoother.SetNumberOfIterations(10)
+        smoother.SetRelaxationFactor(0.1)
+
+        # Mapper
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(smoother.GetOutputPort())
+        mapper.ScalarVisibilityOff()
+
+        # Actor con color basado en el valor medio del rango
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+
+        # Color basado en la posición media del rango
+        range_mid = (lower_threshold + upper_threshold) / 2
+        data_min = np.min(self.array)
+        data_max = np.max(self.array)
+
+        # Normalizar posición media para color
+        if data_max > data_min:
+            color_pos = (range_mid - data_min) / (data_max - data_min)
+        else:
+            color_pos = 0.5
+
+        # Esquema de color: Azul (bajo) -> Verde (medio) -> Rojo (alto)
+        if color_pos < 0.33:
+            # Azul a Verde
+            r = 0.0
+            g = color_pos * 3
+            b = 1.0 - color_pos * 3
+        elif color_pos < 0.66:
+            # Verde a Amarillo
+            r = (color_pos - 0.33) * 3
+            g = 1.0
+            b = 0.0
+        else:
+            # Amarillo a Rojo
+            r = 1.0
+            g = 1.0 - (color_pos - 0.66) * 3
+            b = 0.0
+
+        actor.GetProperty().SetColor(r, g, b)
+        actor.GetProperty().SetOpacity(0.95)
+        actor.GetProperty().SetSpecular(0.3)
+        actor.GetProperty().SetSpecularPower(20)
+        actor.GetProperty().SetDiffuse(0.8)
+        actor.GetProperty().SetAmbient(0.3)
+
+        # Renderer
+        renderer = vtk.vtkRenderer()
+        render_window = vtk.vtkRenderWindow()
+        render_window.AddRenderer(renderer)
+        render_window.SetSize(1000, 800)
+        render_window.SetWindowName(f"Surface Rendering - Umbrales [{lower_threshold:.1f}, {upper_threshold:.1f}]")
+
+        renderer.AddActor(actor)
+        renderer.SetBackground(0.1, 0.1, 0.3)
+        renderer.ResetCamera()
+
+        # Interactor
+        render_window_interactor = vtk.vtkRenderWindowInteractor()
+        render_window_interactor.SetRenderWindow(render_window)
+
+        # Calcular estadísticas
+        mask = (self.array >= lower_threshold) & (self.array <= upper_threshold)
+        visible_voxels = np.sum(mask)
+        total_voxels = mask.size
+        percentage = (visible_voxels / total_voxels) * 100
+
+        print(f"Surface rendering con doble umbral listo.")
+        print(f"Umbrales: [{lower_threshold:.1f}, {upper_threshold:.1f}]")
+        print(f"Voxeles en el rango: {visible_voxels}/{total_voxels} ({percentage:.2f}%)")
+        print(f"Color: RGB({r:.2f}, {g:.2f}, {b:.2f}) para rango medio {range_mid:.1f}")
+        print("Controles: Click y arrastrar para rotar, R para reset, Q para salir")
+
+        render_window.Render()
+        render_window_interactor.Start()
 
 
 def main():
@@ -1424,9 +1559,14 @@ def main():
 
                 else:
                     print("Opción no válida.")
+            # En el menú principal, modifica la opción 2 para que sea directa:
             elif choice == '2':
-                print("Iniciando surface rendering... (esto puede tomar unos segundos)")
-                viewer.surface_rendering_simple()
+                print("\n" + "=" * 50)
+                print("SURFACE RENDERING CON DOBLE UMBRAL")
+                print("=" * 50)
+                print("Se mostrarán las superficies entre un umbral bajo y alto.")
+
+                viewer.surface_rendering_double_threshold()
             elif choice == '3':
                 try:
                     current_threshold = np.percentile(viewer.array, 70)
