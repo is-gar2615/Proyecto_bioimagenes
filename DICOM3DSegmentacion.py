@@ -1520,7 +1520,7 @@ def main():
                 print("=" * 50)
                 print("1. Segmentación por Umbrales Interactiva")
                 print("2. Segmentación OTSU (automática)")
-                print("3. Segmentación Gaussiana (GMM)")
+                print("3. Segmentación K-Means")
                 print("4. Múltiples Esquemas de Color por Umbrales")
                 print("5. Volver al menú principal")
 
